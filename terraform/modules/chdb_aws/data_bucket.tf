@@ -1,5 +1,6 @@
 resource "aws_s3_bucket" "data" {
-  bucket = "${local.name_prefix}-data"
+  bucket        = "${local.name_prefix}-data"
+  force_destroy = true
 }
 
 resource "aws_s3_bucket_versioning" "data" {

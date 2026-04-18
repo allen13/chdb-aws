@@ -36,6 +36,11 @@ data "aws_iam_policy_document" "write_inline" {
   statement {
     sid = "S3TablesWrite"
     actions = [
+      "s3tables:GetTableBucket",
+      "s3tables:GetTableBucketMaintenanceConfiguration",
+      "s3tables:GetNamespace",
+      "s3tables:ListNamespaces",
+      "s3tables:ListTables",
       "s3tables:GetTable",
       "s3tables:GetTableMetadataLocation",
       "s3tables:UpdateTableMetadataLocation",
@@ -71,8 +76,10 @@ data "aws_iam_policy_document" "read_inline" {
   statement {
     sid = "S3TablesRead"
     actions = [
-      "s3tables:GetTable",
       "s3tables:GetTableBucket",
+      "s3tables:GetTableBucketMaintenanceConfiguration",
+      "s3tables:GetNamespace",
+      "s3tables:GetTable",
       "s3tables:GetTableMetadataLocation",
       "s3tables:GetTableData",
       "s3tables:ListNamespaces",
@@ -82,6 +89,15 @@ data "aws_iam_policy_document" "read_inline" {
       aws_s3tables_table_bucket.this.arn,
       "${aws_s3tables_table_bucket.this.arn}/*",
     ]
+  }
+
+  # chDB's icebergS3() reads metadata/data files using plain S3 API from the
+  # underlying bucket S3 Tables uses to back each table (names match
+  # `*--table-s3`). Grant direct S3 read access to those buckets.
+  statement {
+    sid       = "UnderlyingTableBucketRead"
+    actions   = ["s3:GetObject", "s3:GetBucketLocation", "s3:ListBucket"]
+    resources = ["arn:aws:s3:::*--table-s3", "arn:aws:s3:::*--table-s3/*"]
   }
 }
 

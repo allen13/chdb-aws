@@ -1,45 +1,49 @@
-from urllib.parse import urlparse
+import os
+import tempfile
+from functools import lru_cache
 
-import boto3
 import chdb  # pyright: ignore[reportMissingImports]
+import pyarrow.parquet as pq
+from pyiceberg.catalog import Catalog, load_catalog
 
 from chdb_aws.config import Config
 
-_s3tables = boto3.client("s3tables")
 
-
-def _split_metadata_uri(uri: str) -> tuple[str, str]:
-    """s3://bucket/path/to/table/metadata/00001-x.metadata.json
-       -> ("s3://bucket/path/to/table/", "metadata/00001-x.metadata.json")"""
-    parsed = urlparse(uri)
-    if parsed.scheme != "s3":
-        raise ValueError(f"unexpected metadata URI: {uri!r}")
-    key = parsed.path.lstrip("/")
-    sep = "/metadata/"
-    idx = key.rfind(sep)
-    if idx < 0:
-        raise ValueError(f"no /metadata/ segment in {uri!r}")
-    table_root = f"s3://{parsed.netloc}/{key[: idx + 1]}"
-    relative_metadata = key[idx + 1 :]
-    return table_root, relative_metadata
+@lru_cache(maxsize=1)
+def _catalog(cfg: Config) -> Catalog:
+    return load_catalog(
+        "s3tables",
+        **{
+            "type": "rest",
+            "warehouse": cfg.table_bucket_arn,
+            "uri": f"https://s3tables.{cfg.region}.amazonaws.com/iceberg",
+            "rest.sigv4-enabled": "true",
+            "rest.signing-name": "s3tables",
+            "rest.signing-region": cfg.region,
+        },
+    )
 
 
 def query(cfg: Config, asset: str, sql_template: str) -> str:
     """Run a chDB SQL query against the asset's S3 Tables table.
 
-    sql_template references the table as ``${asset}`` — it is replaced with
-    a fully-qualified ``icebergS3(...)`` table function bound to the current
-    metadata snapshot retrieved from the s3tables API.
+    chDB's native ``icebergS3()`` talks to the underlying bucket with plain S3
+    API, which S3 Tables refuses. We use pyiceberg (which goes through the
+    S3 Tables REST catalog + vended credentials) to materialize the table as a
+    local parquet file, then let chDB read that via ``file()``.
     """
-    location = _s3tables.get_table_metadata_location(
-        tableBucketARN=cfg.table_bucket_arn,
-        namespace=cfg.namespace,
-        name=asset,
-    )["metadataLocation"]
+    table = _catalog(cfg).load_table((cfg.namespace, asset))
+    arrow_table = table.scan().to_arrow()
 
-    table_root, rel_metadata = _split_metadata_uri(location)
-    table_fn = f"icebergS3('{table_root}')"
-    settings = f"SETTINGS iceberg_metadata_file_path = '{rel_metadata}'"
-
-    sql = f"{sql_template.replace('${asset}', table_fn)} {settings}"
-    return str(chdb.query(sql, cfg.result_format))
+    fd, path = tempfile.mkstemp(suffix=".parquet", dir="/tmp")
+    os.close(fd)
+    try:
+        pq.write_table(arrow_table, path)
+        table_fn = f"file('{path}', 'Parquet')"
+        sql = sql_template.replace("${asset}", table_fn)
+        return str(chdb.query(sql, cfg.result_format))
+    finally:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass

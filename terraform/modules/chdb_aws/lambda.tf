@@ -34,7 +34,7 @@ resource "aws_lambda_function" "read" {
   package_type  = "Image"
   image_uri     = var.image_uri
 
-  memory_size = 4096
+  memory_size = 3008
   timeout     = 300
 
   image_config {

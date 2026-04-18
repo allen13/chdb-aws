@@ -1,7 +1,8 @@
-aws_region        = "us-east-1"
-environment       = "dev"
-table_bucket_name = "chdb-aws-dev"
-table_namespace   = "analytics_dev"
+aws_region  = "us-east-1"
+environment = "dev"
+# table_bucket_name and table_namespace are injected per-run by the terratest
+# with a random suffix so we don't collide with AWS's post-delete transitional
+# state on the S3 Tables bucket name.
 
 assets = {
   events = {

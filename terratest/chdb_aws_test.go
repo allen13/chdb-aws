@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -50,11 +51,18 @@ func TestChdbAwsDev(t *testing.T) {
 	repoRoot, err := filepath.Abs("..")
 	require.NoError(t, err)
 
+	suffix := fmt.Sprintf("%x", rand.Uint32())[:6]
+	tableBucket := "chdb-aws-dev-" + suffix
+	namespace := "analytics_dev_" + suffix
+	t.Logf("unique suffix=%s tableBucket=%s namespace=%s", suffix, tableBucket, namespace)
+
 	opts := &terraform.Options{
 		TerraformDir: terraformDir,
 		VarFiles:     []string{devTfvars},
 		Vars: map[string]interface{}{
-			"image_uri": imageURI,
+			"image_uri":         imageURI,
+			"table_bucket_name": tableBucket,
+			"table_namespace":   namespace,
 		},
 	}
 
