@@ -6,4 +6,5 @@ module "chdb_aws" {
   image_uri         = var.image_uri
   table_bucket_name = var.table_bucket_name
   table_namespace   = var.table_namespace
+  assets            = var.assets
 }

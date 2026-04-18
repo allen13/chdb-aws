@@ -26,3 +26,13 @@ variable "table_namespace" {
   type    = string
   default = "analytics_dev"
 }
+
+variable "assets" {
+  type = map(object({
+    schema = list(object({
+      name     = string
+      type     = string
+      required = optional(bool, false)
+    }))
+  }))
+}

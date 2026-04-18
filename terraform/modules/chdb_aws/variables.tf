@@ -11,7 +11,7 @@ variable "project_name" {
 
 variable "image_uri" {
   type        = string
-  description = "ECR image URI (repo:tag or repo@digest) for the Lambda container."
+  description = "ECR image URI (repo:tag or repo@digest) for both Lambda containers."
   default     = null
 }
 
@@ -23,4 +23,15 @@ variable "table_bucket_name" {
 variable "table_namespace" {
   type        = string
   description = "Namespace within the S3 Tables bucket."
+}
+
+variable "assets" {
+  type = map(object({
+    schema = list(object({
+      name     = string
+      type     = string
+      required = optional(bool, false)
+    }))
+  }))
+  description = "Map of asset name to its Iceberg schema. Each key becomes a table and its dropzone/archive prefix."
 }

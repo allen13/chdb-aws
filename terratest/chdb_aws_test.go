@@ -18,6 +18,10 @@ func TestChdbAwsDev(t *testing.T) {
 	defer terraform.Destroy(t, opts)
 	terraform.InitAndApply(t, opts)
 
+	assert.NotEmpty(t, terraform.Output(t, opts, "data_bucket_name"))
 	assert.NotEmpty(t, terraform.Output(t, opts, "table_bucket_arn"))
 	assert.NotEmpty(t, terraform.Output(t, opts, "ecr_repository_url"))
+
+	tableArns := terraform.OutputMap(t, opts, "table_arns")
+	assert.Contains(t, tableArns, "events")
 }

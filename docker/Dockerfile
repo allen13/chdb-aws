@@ -11,4 +11,4 @@ RUN uv sync --frozen --no-dev --no-install-project \
 
 COPY src/ ${LAMBDA_TASK_ROOT}/
 
-CMD ["chdb_aws.handler.handler"]
+CMD ["chdb_aws.write.handler.handler"]

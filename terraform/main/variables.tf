@@ -30,3 +30,14 @@ variable "table_namespace" {
   type        = string
   description = "Namespace within the S3 Tables bucket."
 }
+
+variable "assets" {
+  type = map(object({
+    schema = list(object({
+      name     = string
+      type     = string
+      required = optional(bool, false)
+    }))
+  }))
+  description = "Map of asset → Iceberg schema."
+}

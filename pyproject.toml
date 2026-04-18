@@ -1,15 +1,15 @@
 [project]
 name = "chdb-aws"
 version = "0.1.0"
-description = "Add your description here"
+description = "S3 Tables ingest + chDB query Lambda."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "boto3>=1.34",
     "chdb>=4.0",
+    "pyarrow>=16",
+    "pyiceberg[pyarrow]>=0.7",
 ]
-
-[project.scripts]
-chdb-aws = "chdb_aws.main:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -20,7 +20,9 @@ packages = ["src/chdb_aws"]
 
 [dependency-groups]
 dev = [
+    "moto[s3,s3tables]>=5.0",
     "pytest>=8.0",
+    "pytest-mock>=3.12",
 ]
 
 [tool.pytest.ini_options]
