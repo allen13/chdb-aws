@@ -23,6 +23,7 @@ dev = [
     "moto[s3,s3tables]>=5.0",
     "pytest>=8.0",
     "pytest-mock>=3.12",
+    "python-hcl2>=5.0",
 ]
 
 [tool.pytest.ini_options]
