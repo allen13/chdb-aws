@@ -197,6 +197,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-mock" },
     { name = "python-hcl2" },
+    { name = "rich" },
 ]
 
 [package.metadata]
@@ -213,6 +214,7 @@ dev = [
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-mock", specifier = ">=3.12" },
     { name = "python-hcl2", specifier = ">=5.0" },
+    { name = "rich", specifier = ">=13.0" },
 ]
 
 [[package]]

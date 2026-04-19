@@ -4,32 +4,24 @@ table_bucket_name = "chdb-aws"
 table_namespace   = "analytics"
 
 assets = {
-  events = {
+  # CDN edge request log — single asset used by the demo scripts under
+  # scripts/demo/. Chosen to exercise a broad slice of chDB's query surface
+  # (time bucketing, quantiles, approx distinct, top-K, regex, windows).
+  requests = {
     schema = [
-      { name = "id", type = "string", required = true },
-      { name = "event_type", type = "string" },
-      { name = "ts", type = "timestamp" },
-      { name = "payload", type = "string" },
-    ]
-  }
-
-  test_users = {
-    schema = [
-      { name = "id", type = "long", required = true },
-      { name = "email", type = "string", required = true },
-      { name = "name", type = "string" },
-      { name = "is_active", type = "boolean" },
-      { name = "created_at", type = "timestamptz", required = true },
-    ]
-  }
-
-  test_orders = {
-    schema = [
-      { name = "id", type = "long", required = true },
-      { name = "user_id", type = "long", required = true },
-      { name = "amount", type = "decimal(18,2)" },
-      { name = "currency", type = "string" },
-      { name = "order_ts", type = "timestamptz", required = true },
+      { name = "request_id", type = "string", required = true },
+      { name = "ts", type = "timestamptz", required = true },
+      { name = "edge_pop", type = "string" },
+      { name = "client_ip", type = "string" },
+      { name = "country", type = "string" },
+      { name = "http_method", type = "string" },
+      { name = "path", type = "string" },
+      { name = "status_code", type = "int" },
+      { name = "bytes_sent", type = "long" },
+      { name = "response_time_ms", type = "int" },
+      { name = "cache_hit", type = "boolean" },
+      { name = "user_agent", type = "string" },
+      { name = "referrer", type = "string" },
     ]
   }
 }

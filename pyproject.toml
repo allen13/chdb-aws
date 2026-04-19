@@ -24,6 +24,7 @@ dev = [
     "pytest>=8.0",
     "pytest-mock>=3.12",
     "python-hcl2>=5.0",
+    "rich>=13.0",
 ]
 
 [tool.pytest.ini_options]
