@@ -236,13 +236,17 @@ uv run scripts/demo/query_performance.py
 uv run scripts/demo/query_anomalies.py
 ```
 
-Reference total wall time on a 10M-row dataset, 3008 MB / 4 GB-tmp Lambda, warm container:
+Reference total wall time on the **10M-row** dataset, 3008 MB / 4 GB-tmp Lambda, `us-east-1`. `iceberg_s3` numbers are the median of three back-to-back warm runs. `materialize` numbers are after a cache-warming run.
 
-| Script | `iceberg_s3 + glue` (default) | `materialize + glue` (warm cache) |
-|---|---|---|
-| `query_traffic.py` | ~6–20 s | ~7 s |
-| `query_performance.py` | ~5–10 s | ~3 s |
-| `query_anomalies.py` | ~10–25 s | ~5 s |
+| Script | `iceberg_s3 + glue` (default) | `materialize + glue` (warm cache) | dominant cost in iceberg_s3 |
+|---|---|---|---|
+| `query_traffic.py` | **~12 s** (4 queries) | ~7 s | Q1 `count + uniqExact` over the full table (~6 s wall, ~5.7 s chDB) |
+| `query_performance.py` | **~6 s** (4 queries) | ~3 s | even split — quantile aggregates over 4 different columns |
+| `query_anomalies.py` | **~24 s** (4 queries) | ~5 s | Q2 top-10 offender IPs (~15 s) — group by `client_ip` is high-cardinality (~850k uniques) and the query does several conditional aggregates per group |
+
+The anomalies run is dominated by one heavy query — strip it out (or cap with `LIMIT` upstream of the group-by) and the suite drops to ~9 s.
+
+Cold-start additions on top of warm steady-state: ~3–8 s for Lambda container init + chDB process bootstrap, paid once per ~15-min idle period.
 
 If you want to *show off the cold path* in a screenshot, push a new image or wait 15+ minutes between runs.
 
