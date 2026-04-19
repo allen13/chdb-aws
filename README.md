@@ -44,8 +44,6 @@ uv run scripts/demo/populate.py --rows 1000000 --batches 10
 
 Generates one million rows with realistic skew (lognormal latencies, 90% cache-hit rate, 200s dominating status codes, long-tail client IPs, ~30 edge POPs, ~25 countries), writes them as 10 parquet files, drops each in `s3://<bucket>/assets/requests/dropzone/`, and polls for the archive marker so the progress bar reflects actual ingestion.
 
-![populate screenshot](docs/screenshots/populate.png)
-
 ### 2. Query — three analytical workloads
 
 Each script runs 4 queries against the read Lambda and prints each result as a rich table plus a per-query metrics line (chDB wall time, rows read, bytes read).
@@ -60,19 +58,19 @@ The first query on a cold Lambda pays a ~5–10 s scan of the Iceberg table into
 
 #### Traffic overview
 
-![traffic screenshot](docs/screenshots/traffic.png)
+![traffic screenshot](scripts/demo/traffic.png)
 
 Demonstrates `uniqExact`, top-K with share-of-total via window functions, `toStartOfHour` bucketing, cache-hit aggregates.
 
 #### Performance analysis
 
-![performance screenshot](docs/screenshots/performance.png)
+![performance screenshot](scripts/demo/perf.png)
 
 Demonstrates `quantile(...)`, `multiIf` for labelled boolean grouping, quantile families grouped by a dimension, response-size distributions.
 
 #### Error & anomaly detection
 
-![anomalies screenshot](docs/screenshots/anomalies.png)
+![anomalies screenshot](scripts/demo/outliers.png)
 
 Demonstrates `countIf` conditional aggregates, WITH-clause for p99 thresholds, regex matching (`match(user_agent, '(?i)bot|crawler|…')`), multi-class segmentation with `multiIf`.
 
