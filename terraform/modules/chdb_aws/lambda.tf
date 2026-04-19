@@ -3,6 +3,8 @@ locals {
     DATA_BUCKET      = aws_s3_bucket.data.id
     TABLE_BUCKET_ARN = aws_s3tables_table_bucket.this.arn
     TABLE_NAMESPACE  = aws_s3tables_namespace.this.namespace
+    GLUE_DATABASE    = aws_glue_catalog_database.this.name
+    ICEBERG_BUCKET   = aws_s3_bucket.iceberg.id
   }
 }
 
@@ -36,6 +38,13 @@ resource "aws_lambda_function" "read" {
 
   memory_size = 3008
   timeout     = 300
+
+  ephemeral_storage {
+    # /tmp size. Default 512MB is too small for the materialize engine at
+    # multi-million-row scale (full snapshot parquet). 4 GB covers ~25M
+    # rows of the demo schema with headroom; bump if you need more.
+    size = 4096
+  }
 
   image_config {
     command = ["chdb_aws.read.handler.handler"]

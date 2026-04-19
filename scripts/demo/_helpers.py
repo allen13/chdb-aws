@@ -97,13 +97,28 @@ def invoke_read(
     asset: str,
     sql: str,
     region: str = DEFAULT_REGION,
+    *,
+    backend: str = "glue",
+    engine: str = "iceberg_s3",
+    columns: list[str] | None = None,
+    where: str | None = None,
 ) -> QueryResult:
     client = _lambda_client(region)
+    payload: dict[str, Any] = {
+        "asset": asset,
+        "sql": sql,
+        "backend": backend,
+        "engine": engine,
+    }
+    if columns:
+        payload["columns"] = list(columns)
+    if where:
+        payload["where"] = where
     start = time.perf_counter()
     resp = client.invoke(
         FunctionName=function_name,
         InvocationType="RequestResponse",
-        Payload=json.dumps({"asset": asset, "sql": sql}).encode(),
+        Payload=json.dumps(payload).encode(),
     )
     wall = time.perf_counter() - start
 
@@ -252,14 +267,25 @@ def summarize(total_wall_s: float, query_count: int, total_rows_read: int, total
     console.print()
 
 
-def run_suite(function_name: str, asset: str, region: str, queries: list[tuple[str, str]]) -> None:
+def run_suite(
+    function_name: str,
+    asset: str,
+    region: str,
+    queries: list[tuple[str, str]],
+    *,
+    backend: str = "glue",
+    engine: str = "iceberg_s3",
+) -> None:
     """Run a list of (title, sql) pairs, rendering each and a final summary."""
     total_wall = 0.0
     total_rows = 0
     total_bytes = 0
     for title, sql in queries:
         try:
-            result = invoke_read(function_name, asset, sql, region=region)
+            result = invoke_read(
+                function_name, asset, sql, region=region,
+                backend=backend, engine=engine,
+            )
         except Exception as exc:  # noqa: BLE001
             console.print(f"[red]error running {title!r}: {exc}[/red]")
             sys.exit(1)

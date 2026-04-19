@@ -21,3 +21,15 @@ output "write_lambda_function_name" {
 output "read_lambda_function_name" {
   value = module.chdb_aws.read_lambda_function_name
 }
+
+output "glue_database_name" {
+  value = module.chdb_aws.glue_database_name
+}
+
+output "iceberg_bucket_name" {
+  value = module.chdb_aws.iceberg_bucket_name
+}
+
+output "glue_table_names" {
+  value = module.chdb_aws.glue_table_names
+}

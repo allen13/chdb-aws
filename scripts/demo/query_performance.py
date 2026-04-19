@@ -91,13 +91,22 @@ def main() -> None:
     ap.add_argument("--function-name", default=DEFAULT_FUNCTION)
     ap.add_argument("--asset", default=DEFAULT_ASSET)
     ap.add_argument("--region", default=DEFAULT_REGION)
+    ap.add_argument("--backend", choices=("s3tables", "glue"), default="glue")
+    ap.add_argument(
+        "--engine",
+        choices=("materialize", "scan", "iceberg_s3"),
+        default="iceberg_s3",
+    )
     args = ap.parse_args()
 
     banner(
         "Performance Analysis",
-        f"asset={args.asset}  ·  lambda={args.function_name}  ·  region={args.region}",
+        f"asset={args.asset}  ·  backend={args.backend}  ·  engine={args.engine}",
     )
-    run_suite(args.function_name, args.asset, args.region, QUERIES)
+    run_suite(
+        args.function_name, args.asset, args.region, QUERIES,
+        backend=args.backend, engine=args.engine,
+    )
 
 
 if __name__ == "__main__":

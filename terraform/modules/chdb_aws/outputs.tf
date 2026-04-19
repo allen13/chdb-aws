@@ -27,3 +27,17 @@ output "write_lambda_function_name" {
 output "read_lambda_function_name" {
   value = try(aws_lambda_function.read[0].function_name, null)
 }
+
+output "glue_database_name" {
+  value = aws_glue_catalog_database.this.name
+}
+
+output "iceberg_bucket_name" {
+  value = aws_s3_bucket.iceberg.id
+}
+
+output "glue_table_names" {
+  # Glue iceberg tables are created lazily by the write Lambda; here we just
+  # surface the names that *will* exist once the first write lands.
+  value = { for k in keys(var.assets) : k => "${aws_glue_catalog_database.this.name}.${k}" }
+}

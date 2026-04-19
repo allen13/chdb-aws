@@ -1,12 +1,17 @@
-# Demo — CDN edge logs on chDB + S3 Tables
+# Demo — CDN edge logs on chDB + Iceberg
 
-A self-contained demo that loads ~1 million synthetic CDN-edge request rows into the `requests` Iceberg table and queries them through the read Lambda with chDB. Built to be screenshot-friendly: every script prints with `rich` (panels, syntax-highlighted SQL, result tables, per-query timing line, run summary).
+A self-contained demo that loads up to 10 million synthetic CDN-edge request rows into the `requests` Iceberg table and queries them through the read Lambda with chDB. The write Lambda **dual-writes** every batch into two parallel Iceberg backends so you can compare:
+
+- **`glue`** (default for the demo) — regular S3 bucket + AWS Glue Data Catalog. Storage is in our own bucket so chDB's native `icebergS3()` table function works directly.
+- **`s3tables`** — AWS S3 Tables managed Iceberg. Storage lives in AWS-owned `*--table-s3` buckets that refuse plain `GetBucketLocation`, which blocks chDB's S3 client; we fall back to a pyiceberg-materialize path here.
+
+Built to be screenshot-friendly: every script prints with `rich` (panels, syntax-highlighted SQL, result tables, per-query timing line, run summary).
 
 ## What's here
 
 | Script | What it does |
 |---|---|
-| `populate.py` | Generates N rows of realistic CDN logs in B parquet batches, drops them in the dropzone, and polls each batch through to the archive prefix so the progress bar reflects real ingestion. |
+| `populate.py` | Generates N rows of realistic CDN logs in B parquet batches, drops them in the dropzone, and polls each batch through to the archive prefix so the progress bar reflects real ingestion. The write Lambda fans out to both backends. |
 | `query_traffic.py` | Volume / geography / time / POP mix. Demonstrates `uniqExact`, top-K, hourly bucketing, window functions for share-of-total. |
 | `query_performance.py` | Latency quantiles / slow paths / cache lift / response-size histogram. Demonstrates `quantile(...)`, `multiIf`-labelled boolean grouping, conditional averages. |
 | `query_anomalies.py` | 5xx trends / offender IPs / p99 outliers / bot regex. Demonstrates `countIf`, WITH-clause for thresholds, `match()` regex, multi-class segmentation. |
@@ -19,11 +24,73 @@ You don't need to pass `--function-name` or `--data-bucket` — the helpers read
 | Default | Env var override | Terraform output key |
 |---|---|---|
 | Lambda function name | `CHDB_READ_FUNCTION` | `read_lambda_function_name` |
-| Data bucket | `CHDB_DATA_BUCKET` | `data_bucket_name` |
+| Data bucket (dropzone) | `CHDB_DATA_BUCKET` | `data_bucket_name` |
 | Asset name | `CHDB_ASSET` | — (defaults to `requests`) |
 | AWS region | `AWS_REGION` | — (defaults to `us-east-1`) |
 
 So as long as `terraform apply` has been run on `terraform/main`, every script Just Works.
+
+## Backends and engines
+
+The read Lambda has two orthogonal axes — pick a backend (where the Iceberg metadata + data files live) and an engine (how chDB gets at the data). The demo defaults to **`backend=glue, engine=iceberg_s3`** because that path scales the best — chDB streams parquet directly from S3, no Lambda-side materialization, no `/tmp`.
+
+### Backends
+
+| Backend | Storage | Catalog | Notes |
+|---|---|---|---|
+| **`glue`** (demo default) | Regular S3 bucket (`chdb-aws-prod-iceberg`) we own | AWS Glue Data Catalog | Plain S3 — `GetBucketLocation` / `ListObjectsV2` work, so chDB's native `icebergS3()` reads it without help. |
+| `s3tables` | AWS-managed `*--table-s3` underlying buckets | S3 Tables Iceberg REST endpoint (SigV4) | Bucket policy refuses `GetBucketLocation`, so `icebergS3` can't be pointed at this directly. The Lambda falls back to pyiceberg-materialize. |
+
+The write Lambda always writes to **both**. The Glue table is created lazily on the first append using the s3tables table's schema as the source of truth (`src/chdb_aws/write/iceberg_writer.py:_ensure_glue_table`).
+
+### Engines
+
+| Engine | What it does | Caching | Best for |
+|---|---|---|---|
+| **`iceberg_s3`** (demo default) | chDB's native `icebergS3('<table-root>')` reads the Iceberg metadata + data files directly from S3 | None at the Lambda layer; chDB does in-process row-group caching within a single query | Streaming reads of arbitrarily large tables. Per-call cost is roughly proportional to the columns + row groups touched. **Requires `backend=glue`** — `iceberg_s3 + s3tables` raises a clear error because of the bucket-policy block above. |
+| `materialize` | `pyiceberg.scan().to_arrow()` once per snapshot → `/tmp` parquet → chDB `file()` | `/tmp` cache keyed on `(backend, namespace, asset, metadata_location)`; reused across invocations of the same warm container | Repeated diverse queries against an unchanging snapshot. Cold first query pays the full materialize cost (~5–20 s on 10M rows); subsequent queries are sub-second. The Lambda has a 4 GB `/tmp` so this comfortably handles ~25M rows of the demo schema. |
+| `scan` | `pyiceberg.scan(selected_fields=…, row_filter=…)` pushes column projection + manifest-level predicate pruning before any parquet is written; per-call temp file | None | Narrow ad-hoc queries against a wide table where you want to materialize only the columns + rows the query touches. Note: pyiceberg pushdown changes what data chDB sees, so a `WHERE` you push down here is *additional* to whatever's in the SQL. |
+
+Examples:
+
+```sh
+# default — glue + iceberg_s3 (chDB streams directly from S3)
+uv run scripts/query.py --function-name chdb-aws-prod-read \
+    --asset requests --sql 'SELECT count() FROM ${asset}'
+
+# materialize from glue — full snapshot to /tmp, chDB queries the local file
+uv run scripts/query.py --function-name chdb-aws-prod-read \
+    --asset requests --sql 'SELECT count() FROM ${asset}' \
+    --backend glue --engine materialize
+
+# pushdown — only project status_code, push the WHERE down to pyiceberg
+uv run scripts/query.py --function-name chdb-aws-prod-read \
+    --asset requests --sql 'SELECT count() FROM ${asset}' \
+    --backend s3tables --engine scan \
+    --column status_code --where 'status_code >= 500'
+
+# the same iceberg_s3 query but pointing at the S3 Tables backend — fails
+# fast with an explanatory error (kept here so the day chDB gains an S3
+# Tables-aware S3 client this works without further code changes)
+uv run scripts/query.py --function-name chdb-aws-prod-read \
+    --asset requests --sql 'SELECT count() FROM ${asset}' \
+    --backend s3tables --engine iceberg_s3
+```
+
+The lambda payload shape is:
+
+```json
+{
+  "asset": "requests",
+  "sql":   "SELECT count() FROM ${asset}",
+  "backend": "glue",
+  "engine":  "iceberg_s3",
+  "columns": ["status_code"],
+  "where":   "status_code >= 500"
+}
+```
+
+`backend` defaults to `s3tables` and `engine` to `materialize` at the Lambda layer, but the **demo scripts override both** to `backend=glue, engine=iceberg_s3`. Both `columns` and `where` are only meaningful when `engine == "scan"`.
 
 ## One-time prerequisites
 
@@ -34,7 +101,7 @@ Bootstrap the tfstate bucket, deploy the main stack, and push the Lambda image. 
 cd terraform/bootstrap
 terraform init && terraform apply -auto-approve
 
-# 2. main stack — phase 1 (creates ECR + tables, no lambda yet)
+# 2. main stack — phase 1 (creates ECR + tables + Glue DB + iceberg bucket; no lambda yet)
 cd ../main
 terraform init && terraform apply -auto-approve
 
@@ -58,23 +125,27 @@ After the second apply the outputs will show:
 data_bucket_name           = "chdb-aws-prod-data"
 read_lambda_function_name  = "chdb-aws-prod-read"
 write_lambda_function_name = "chdb-aws-prod-write"
+glue_database_name         = "chdb_aws_prod"
+iceberg_bucket_name        = "chdb-aws-prod-iceberg"
 table_arns                 = { "requests" = "arn:aws:s3tables:..." }
+glue_table_names           = { "requests" = "chdb_aws_prod.requests" }
 ```
 
-## Run the demo (the part you screenshot)
+## Run the demo
 
 Each command is independent and uses auto-discovered defaults.
 
 ### populate
 
 ```sh
-uv run scripts/demo/populate.py --rows 1000000 --batches 10
+uv run scripts/demo/populate.py --rows 10000000 --batches 10 --archive-timeout 600
 ```
 
-Expect ~50 s for 1M rows on a fresh run. Output ends with a summary panel showing rows, MB uploaded, wall time, rows/s, and MB/s. **→ screenshot for `docs/screenshots/populate.png`**
+Expect ~150 s for 10M rows (≈ 65k rows/s end-to-end, including S3 upload + dual Iceberg write through the Lambda). Output ends with a summary panel showing rows, MB uploaded, wall time, rows/s, and MB/s.
 
 Useful overrides:
-- `--rows 5000000 --batches 50` for a bigger demo (~5 min, parquet hits a few hundred MB)
+- `--rows 1000000 --batches 4` for a quick smoke (~30 s)
+- `--rows 25000000 --batches 25` to stress test
 - `--no-wait` to skip the dropzone→archive polling (returns as soon as upload completes)
 
 ### query_traffic
@@ -83,9 +154,7 @@ Useful overrides:
 uv run scripts/demo/query_traffic.py
 ```
 
-4 queries: snapshot, top countries, hourly volume, top POPs. **→ screenshot for `docs/screenshots/traffic.png`**
-
-The first query of the very first run pays a cold-Lambda + cold-cache cost (~10 s on a fresh container). Every subsequent query — same script, same snapshot — finishes in well under a second because the read Lambda caches the materialized parquet on `/tmp` keyed on the table's metadata location.
+4 queries: snapshot (count + uniqExact), top countries with share-of-total via window function, hourly volume buckets, top edge POPs with cache-hit rate.
 
 ### query_performance
 
@@ -93,7 +162,7 @@ The first query of the very first run pays a cold-Lambda + cold-cache cost (~10 
 uv run scripts/demo/query_performance.py
 ```
 
-4 queries: overall quantiles, slowest paths by p95, cache hit vs miss latency, response-size histogram by HTTP method. **→ screenshot for `docs/screenshots/performance.png`**
+4 queries: overall latency quantile family (p50/p90/p95/p99/p999/max), slowest paths by p95, cache HIT vs MISS lift, response-size distribution by HTTP method.
 
 ### query_anomalies
 
@@ -101,85 +170,88 @@ uv run scripts/demo/query_performance.py
 uv run scripts/demo/query_anomalies.py
 ```
 
-4 queries: 15-minute error-rate buckets, top offender IPs, p99 outliers (via WITH clause), bot vs client-lib vs browser segmentation by user-agent regex. **→ screenshot for `docs/screenshots/anomalies.png`**
+4 queries: 15-minute error-rate buckets, top offender IPs by 4xx/5xx, p99 outliers via WITH-clause threshold, bot vs client-lib vs browser segmentation by user-agent regex.
 
-## Cold vs warm queries
+## Cold vs warm
 
-There are three independent things that have to be "warm" for a query to feel snappy. Each one accounts for a chunk of the wall-clock time and the demo will hit a different mix of them depending on what just happened.
+Three independent things have to be "warm" for a query to feel snappy. The new default `iceberg_s3` engine and the original `materialize` engine warm up differently — table below summarizes both.
 
-| Layer | What it is | Cost when cold | When it goes cold |
-|---|---|---|---|
-| Lambda container | AWS spins up a new container, loads the image (~1.2 GB), runs Python init, opens the pyiceberg REST catalog connection. | ~2–4 s of `INIT_REPORT` time you'll see in CloudWatch. | After ~15 min of no invocations, or any time AWS recycles the container. |
-| `/tmp` parquet cache | The read Lambda materializes the entire current Iceberg snapshot to a local parquet file under `/tmp/chdb_cache_<hash>.parquet` and lets chDB query it via `file()`. | ~5–10 s for 1M rows: `pyiceberg.scan().to_arrow()` fetches manifests + data files from S3 Tables, then `pq.write_table` lands them on `/tmp`. | Two ways: the container is brand new (so `/tmp` is empty), or a new write has advanced the table's `metadata_location` (so the cache key changes — the old file is still on disk but no query asks for it). |
-| chDB query itself | The actual SQL execution against the local parquet. | Tens to a few hundred ms even on cold disk. Almost never the bottleneck. | Per-query; not really cacheable here without sharing chDB sessions. |
-
-The cache is keyed on `sha1(namespace + asset + metadata_location)` — see `src/chdb_aws/read/query.py:_cache_path`. That means new writes invalidate it automatically (a new snapshot has a new `metadata_location` → new key → new file written), but reads against an unchanged snapshot share one materialized parquet across every query that hits a warm container.
-
-What that looks like in practice on the demo dataset:
-
-| Scenario | First query in the script | Queries 2–4 |
+| Layer | What it is | Cost when cold |
 |---|---|---|
-| Right after `terraform apply` (cold container, cold cache) | **~10 s** (Lambda init + full scan + parquet write + chDB) | sub-second each (warm container, warm cache) |
-| Right after `populate.py` re-ran (container still alive, but new snapshot → cache miss) | **~5–7 s** (no Lambda init, but new scan) | sub-second each (cache now warm for the new snapshot) |
-| Steady state, no recent writes, container kept warm | **<500 ms** | sub-second each |
+| Lambda container | AWS spins up a new container, loads the image (~1.2 GB), runs Python init, opens the pyiceberg REST + Glue catalog connections. | ~3–8 s `INIT_REPORT` time. Goes cold after ~15 min idle or any AWS recycle. |
+| `/tmp` parquet cache (`materialize` only) | Read Lambda materializes the entire current snapshot to a local parquet under `/tmp/chdb_cache_<hash>.parquet`. | ~10–18 s for 10M rows: pyiceberg fetches manifests + data files from S3, then `pq.write_table` lands them on `/tmp`. Cache key invalidates automatically when a new write advances the snapshot's `metadata_location`. |
+| chDB process state (`iceberg_s3` only) | chDB caches manifest reads + S3 client state inside one Lambda invocation. | First query in a fresh container does S3 round trips for metadata + manifests + data files; ~5–15 s for 10M-row aggregates depending on column count touched. Subsequent queries against the same snapshot still hit S3 for data files but skip metadata. |
 
-Lambda containers stay alive for roughly 15 minutes between invocations under typical load — but it's a soft AWS heuristic, not a guarantee. The first script you run after a coffee break will probably pay the container cost again.
+The cache is keyed on `sha1(backend + namespace + asset + metadata_location)` — see `src/chdb_aws/read/query.py:_cache_path`. New writes invalidate it automatically.
 
-If you ever need to see the cold path again, the easiest way is to update the Lambda's environment (or push a new image) — that forces AWS to spin up a fresh container.
+What this looks like in practice on the **10M-row** dataset, demo defaults (`glue + iceberg_s3`):
+
+| Scenario | First query | Queries 2–4 | Notes |
+|---|---|---|---|
+| Right after `terraform apply` (cold container) | **~14 s** | ~1.4–2.9 s each | First query's wall time is mostly Lambda INIT + chDB process bootstrap. |
+| Container kept warm, repeated runs | ~2–3 s | ~1–2 s each | Steady state — every query streams real S3 reads but skips the slow init. |
+
+For comparison, **`glue + materialize`** on the same 10M-row dataset:
+
+| Scenario | First query | Queries 2–4 |
+|---|---|---|
+| Cold container, cold cache | **~18 s** | sub-second each |
+| Warm container, warm cache | ~4 s (cold chDB on the cached parquet) | sub-second each |
+
+So the trade-off:
+
+- `materialize` pays one big upfront cost per snapshot, then everything else is sub-second. Best when you'll run many queries against the same snapshot.
+- `iceberg_s3` pays a smaller, more consistent cost per query (no big upfront tax). Best for one-shot ad-hoc queries or when the snapshot churns often.
+
+The demo defaults to `iceberg_s3` because it scales: there's no `/tmp` ceiling and no per-snapshot cliff. If you'll run a tight loop of queries against the same snapshot, override with `--engine materialize` for the warm-cache wins.
 
 ## Why so fast?
 
-Look at any warm row in the screenshots — `wall 268 ms / chdb 48 ms` for a top-K + cache-rate aggregation across a million rows. Three things make that possible:
+For the `iceberg_s3` engine on `glue`, the read path is:
 
-1. **The Lambda container is already running.** No `INIT_REPORT`, no Python imports, no fresh pyiceberg REST connection. The whole `handler.handler` function is just a few lines on a long-lived process. Warm Lambda invokes have ~50–150 ms of fixed AWS-side dispatch overhead and that's it.
+1. **`boto3.client("lambda").invoke(...)`** from your laptop → AWS Lambda API → warm container. ~50–150 ms of fixed AWS-side overhead.
+2. **`pyiceberg.glue_catalog.load_table(...)`** — one HTTPS hop to AWS Glue to read the current `metadata_location`. ~50–100 ms.
+3. **`chdb.query("... FROM icebergS3('s3://chdb-aws-prod-iceberg/requests/')")`** — chDB's native S3 client reads metadata.json → manifest list → manifests → data files. Vectorized SIMD execution over column batches with parquet row-group statistics for pruning. The chDB time you see is dominated by the actual data-file reads from S3 (a few hundred ms to a few seconds depending on how many columns the query touches and how much data flows back).
+4. **Response payload** back through Lambda → boto3.
 
-2. **The parquet is already on the container's local NVMe.** "Local" here means the same physical Lambda host the chDB process is running on — not your laptop. The first query in the snapshot ran `pyiceberg.scan().to_arrow()` (manifests + data files from S3 Tables → Arrow) and dumped a `~38 MB` zstd parquet to `/tmp/chdb_cache_<hash>.parquet`. The hash is `sha1(namespace + asset + metadata_location)`, so any new write yields a new key and the cache rebuilds; otherwise every later query in the same container hits an `os.path.exists()` instead of touching the network.
+For the `materialize` engine, swap step 3 for a `file()` call against the locally-cached parquet on `/tmp` — that's a single-digit-millisecond mmap read once the cache is warm.
 
-3. **chDB is just executing SQL against a local file.** This is ClickHouse's vectorized engine — SIMD over column batches, parquet's row-group statistics for pruning, only the columns mentioned in the SELECT get decoded. For 1M rows of CDN logs (a 4 MB `int32` column for `response_time_ms`, a ~10 MB `string` column for `country`, etc.), a `quantile + count + groupBy` is single-core CPU-bound at ~30–100 ms. That's the chDB column you see.
+What is **not** happening on either path:
 
-The wall-vs-chDB gap (e.g. `wall 268 / chdb 48` for the POPs query) is fixed-cost overhead, not query work:
+- No `S3:ListObjects` on the data bucket (Iceberg metadata enumerates files explicitly).
+- No remote query engine — the SQL execution is happening inside the Lambda's Python process via chDB.
+- For `iceberg_s3`: nothing materialized to `/tmp`. The Lambda can scale to whatever the table is, limited only by chDB's per-call memory.
 
-| ms | what |
-|---|---|
-| 30–60 | `boto3 invoke` → SigV4 signing → AWS API routing |
-| 50–100 | Lambda warm-invoke dispatch into your container |
-| 50–150 | `pyiceberg.load_table()` — one HTTPS hop to the S3 Tables REST catalog to read the current `metadata_location` (paid every query so the cache key stays correct; could be elided with a short TTL) |
-| 30–300 | chDB query against the local parquet — the only part that scales with data size |
-| 20–50 | response payload back through Lambda → boto3 |
+## Tip — running for screenshots
 
-What is **not** happening on a warm query: no `S3:GetObject` for parquet data files, no `S3:ListObjects`, no remote query engine. The only network calls are your `boto3 invoke` round trip and one S3 Tables catalog lookup. Everything else is CPU + a local file.
-
-## Tip — getting a "warm" run for screenshots
-
-To capture clean sub-second runs, warm everything up once and discard the output, then capture the runs you want:
+To capture a clean run, warm everything once and discard the output, then capture the runs you want:
 
 ```sh
-# warm the container + populate /tmp cache (cold-path run, ~10 s)
+# warm the container + chDB state once (cold-path run, ~15 s on 10M)
 uv run scripts/demo/query_traffic.py >/dev/null
 
-# now capture clean warm-path runs
+# now capture
 uv run scripts/demo/query_traffic.py
 uv run scripts/demo/query_performance.py
 uv run scripts/demo/query_anomalies.py
 ```
 
-Reference timings on a 1M-row dataset, 3008 MB Lambda, warm container, warm cache:
+Reference total wall time on a 10M-row dataset, 3008 MB / 4 GB-tmp Lambda, warm container:
 
-| Script | Total wall (4 queries) |
-|---|---|
-| `query_traffic.py` | ~1.4 s |
-| `query_performance.py` | ~1.1 s |
-| `query_anomalies.py` | ~1.8 s |
+| Script | `iceberg_s3 + glue` (default) | `materialize + glue` (warm cache) |
+|---|---|---|
+| `query_traffic.py` | ~6–20 s | ~7 s |
+| `query_performance.py` | ~5–10 s | ~3 s |
+| `query_anomalies.py` | ~10–25 s | ~5 s |
 
-If you instead want to *show off the cold path* in a screenshot (it's part of the story too — it's where you'd typically advertise that even the cold case is "10 seconds for 1M rows from object storage"), force a new image push or just wait 15+ minutes between runs.
+If you want to *show off the cold path* in a screenshot, push a new image or wait 15+ minutes between runs.
 
 ## Tearing down
 
-`force_destroy = true` is set on the data bucket and ECR repo, so destroy is one shot:
+`force_destroy = true` is set on the data bucket, the iceberg bucket, and the ECR repo, so destroy is one shot:
 
 ```sh
 cd terraform/main
-# match whatever -var image_uri was used at apply time, or pass a dummy
 terraform destroy -auto-approve \
     -var "image_uri=$AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/chdb-aws-prod:latest"
 ```
@@ -188,7 +260,13 @@ The tfstate bucket from `terraform/bootstrap` persists by design — it holds th
 
 ## Screenshots
 
-Captured against 1,000,000 rows on a warm container + warm cache, 3008 MB Lambda, `us-east-1`.
+The current screenshots were captured against 1M rows on a warm container + warm cache. Re-shoot at 10M for a refreshed demo:
+
+```sh
+uv run scripts/demo/query_traffic.py     # → traffic.png
+uv run scripts/demo/query_performance.py # → perf.png
+uv run scripts/demo/query_anomalies.py   # → outliers.png
+```
 
 ### Traffic Overview — `query_traffic.py`
 

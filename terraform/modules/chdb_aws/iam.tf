@@ -52,6 +52,33 @@ data "aws_iam_policy_document" "write_inline" {
       "${aws_s3tables_table_bucket.this.arn}/*",
     ]
   }
+
+  statement {
+    sid     = "IcebergBucketRW"
+    actions = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket", "s3:GetBucketLocation"]
+    resources = [
+      aws_s3_bucket.iceberg.arn,
+      "${aws_s3_bucket.iceberg.arn}/*",
+    ]
+  }
+
+  statement {
+    sid = "GlueIcebergWrite"
+    actions = [
+      "glue:GetDatabase",
+      "glue:GetDatabases",
+      "glue:GetTable",
+      "glue:GetTables",
+      "glue:CreateTable",
+      "glue:UpdateTable",
+      "glue:DeleteTable",
+    ]
+    resources = [
+      "arn:aws:glue:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:catalog",
+      "arn:aws:glue:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:database/${aws_glue_catalog_database.this.name}",
+      "arn:aws:glue:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:table/${aws_glue_catalog_database.this.name}/*",
+    ]
+  }
 }
 
 resource "aws_iam_role_policy" "write_inline" {
@@ -93,13 +120,42 @@ data "aws_iam_policy_document" "read_inline" {
 
   # chDB's icebergS3() reads metadata/data files using plain S3 API from the
   # underlying bucket S3 Tables uses to back each table (names match
-  # `*--table-s3`). Grant direct S3 read access to those buckets.
+  # `*--table-s3`). Grant direct S3 read access to those buckets — the bucket
+  # *policy* refuses ListObjectsV2 / GetBucketLocation regardless, but plain
+  # GetObject + HeadObject do work and that's what Iceberg readers need.
   statement {
     sid       = "UnderlyingTableBucketRead"
     actions   = ["s3:GetObject", "s3:GetBucketLocation", "s3:ListBucket"]
     resources = ["arn:aws:s3:::*--table-s3", "arn:aws:s3:::*--table-s3/*"]
   }
+
+  statement {
+    sid     = "IcebergBucketRead"
+    actions = ["s3:GetObject", "s3:ListBucket", "s3:GetBucketLocation"]
+    resources = [
+      aws_s3_bucket.iceberg.arn,
+      "${aws_s3_bucket.iceberg.arn}/*",
+    ]
+  }
+
+  statement {
+    sid = "GlueIcebergRead"
+    actions = [
+      "glue:GetDatabase",
+      "glue:GetDatabases",
+      "glue:GetTable",
+      "glue:GetTables",
+    ]
+    resources = [
+      "arn:aws:glue:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:catalog",
+      "arn:aws:glue:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:database/${aws_glue_catalog_database.this.name}",
+      "arn:aws:glue:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:table/${aws_glue_catalog_database.this.name}/*",
+    ]
+  }
 }
+
+data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
 
 resource "aws_iam_role_policy" "read_inline" {
   name   = "${local.name_prefix}-read"
